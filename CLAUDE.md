@@ -9,7 +9,10 @@ Build a lightweight, secure Windows service application in Go that runs as a bac
 - **Single Binary Application**: Compile to a single executable with all dependencies embedded
 - **Windows Service**: Auto-install as Windows service on first run
 - **HTTP Server**: Use Fiber v3.0.0+ (lightweight, fast) or Chi v5.0.12+ as fallback
-- **Database**: SQLite with dual-key encryption (machine-unique key + server key)
+- **Database**: SQLite with server-key encryption for critical data
+- **Data Encryption Strategy**:
+  - **Type 1 (Medium Importance)**: Config file data encrypted with machine key ONLY
+  - **Type 2 (Very Important)**: Database data encrypted with server key ONLY
 - **Config Sync**: Every 59 seconds from server start time
 - **Offline Mode**: Continue operation for 24 hours without server connection
 - **GUI**: Login screen for initial setup with PIN authentication
@@ -121,12 +124,24 @@ pos-service/
 // internal/database/sqlite.go
 // Features:
 // - SQLite with WAL mode enabled
-// - Dual-key encryption:
-//   1. Machine key (derived from machine ID)
-//   2. Server key (fetched from API)
+// - Server-key encryption ONLY:
+//   - ALL database data encrypted with server key (fetched from API)
+//   - Server key is the ONLY key used for database encryption
 // - Use SQLCipher or custom encryption layer
 // - Database location: %PROGRAMDATA%\POSService\data.db
-// 
+//
+// Required tables:
+// 1. settings table (REQUIRED):
+//    CREATE TABLE settings (
+//        key   VARCHAR(255) PRIMARY KEY,
+//        value TEXT NOT NULL,
+//        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+//        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+//    );
+//    - Used for: app preferences, runtime config, feature flags
+//    - Encrypted with SERVER KEY only
+// 2. [Other application tables as needed]
+//
 // PRAGMA settings:
 // PRAGMA journal_mode=WAL;
 // PRAGMA busy_timeout=5000;
@@ -149,9 +164,11 @@ type Config struct {
     Encrypted      bool   `json:"encrypted"`
 }
 
-// Encryption: AES-256-GCM using machine ID as key
-// Storage: %PROGRAMDATA%\POSService\config.enc
-// Fallback: Keep last valid config for 24 hours
+// TYPE 1 DATA (Medium Importance):
+// - Encryption: AES-256-GCM using MACHINE KEY ONLY
+// - Storage: %PROGRAMDATA%\POSService\config.enc
+// - Fallback: Keep last valid config for 24 hours
+// - Machine key is derived from machine ID and used exclusively for config
 ```
 
 ### Phase 2: Windows Service Implementation
@@ -180,12 +197,55 @@ type Config struct {
 // - Graceful shutdown support
 // - Memory optimization for 2-4GB systems
 
+// Standard Response Structure (ALL endpoints MUST use this):
+type APIResponse struct {
+    OK      bool        `json:"ok"`
+    Code    int         `json:"code"`
+    Message string      `json:"message"`
+    Result  interface{} `json:"result,omitempty"`
+    Meta    interface{} `json:"meta,omitempty"`
+}
+
 // Routes:
 // GET  /health          - Health check
 // GET  /status          - Service status
 // POST /data           - Data endpoint
 // GET  /config         - Get current config
 // POST /sync           - Force sync
+// POST /service/start  - Start the Windows service
+// POST /service/stop   - Stop the Windows service
+// POST /service/restart - Restart the Windows service
+```
+
+#### 2.3 API Response Standard
+```go
+// internal/api/models.go
+// ALL HTTP endpoints MUST return this structure:
+type APIResponse struct {
+    OK      bool        `json:"ok"`      // true if successful, false if error
+    Code    int         `json:"code"`    // HTTP status code (200, 400, 500, etc.)
+    Message string      `json:"message"` // Human-readable message
+    Result  interface{} `json:"result,omitempty"`  // Response data (optional)
+    Meta    interface{} `json:"meta,omitempty"`    // Metadata (pagination, etc.)
+}
+
+// Example success response:
+// {
+//   "ok": true,
+//   "code": 200,
+//   "message": "Data retrieved successfully",
+//   "result": {"id": 123, "name": "Product A"},
+//   "meta": {"timestamp": "2025-11-16T10:00:00Z"}
+// }
+
+// Example error response:
+// {
+//   "ok": false,
+//   "code": 400,
+//   "message": "Invalid request parameters",
+//   "result": null,
+//   "meta": {"error_code": "INVALID_PARAMS"}
+// }
 ```
 
 ### Phase 3: Synchronization System
@@ -239,10 +299,14 @@ type Config struct {
 //   - Status (connected/offline)
 //   - Last sync time
 //   - Force sync now
+//   - Service Control:
+//     - Start Service
+//     - Stop Service
+//     - Restart Service
 //   - Open logs
 //   - Settings
 //   - About
-//   - Exit (stops GUI only, not service)
+//   - (NO Exit option - GUI stays running)
 ```
 
 ### Phase 5: Installer Development
@@ -281,15 +345,24 @@ type Config struct {
 #### 6.1 Encryption Keys
 ```go
 // internal/security/encryption.go
-// Key management:
-// 1. Machine Key: PBKDF2(machineID, salt, 10000 iterations)
-// 2. Server Key: Fetched via HTTPS, rotated monthly
-// 3. Config Encryption: AES-256-GCM
-// 4. Database Encryption: ChaCha20-Poly1305
-// 
-// Key storage:
-// - Machine key: Derived on demand
-// - Server key: Encrypted with machine key, stored locally
+// CRITICAL: Two separate encryption domains:
+//
+// TYPE 1 DATA (Medium Importance) - CONFIG FILE ONLY:
+// - Encryption: AES-256-GCM with MACHINE KEY ONLY
+// - Key: PBKDF2(machineID, salt, 10000 iterations)
+// - Usage: Config file encryption/decryption
+// - Storage: Machine key derived on demand, never stored
+//
+// TYPE 2 DATA (Very Important) - DATABASE ONLY:
+// - Encryption: ChaCha20-Poly1305 with SERVER KEY ONLY
+// - Key: Fetched via HTTPS from server, rotated monthly
+// - Usage: ALL database encryption/decryption
+// - Storage: Server key encrypted with machine key, stored in registry
+//
+// Key separation rules:
+// - Machine key NEVER touches database
+// - Server key NEVER touches config file
+// - No dual-key or hybrid encryption
 ```
 
 #### 6.2 Token Management
@@ -351,17 +424,24 @@ type SyncStatus struct {
 
 ### Unit Tests
 - Machine ID generation consistency
-- Encryption/decryption roundtrip
+- Encryption/decryption roundtrip for both key types:
+  - Machine key encryption/decryption (config file)
+  - Server key encryption/decryption (database)
+  - Verify key separation (machine key cannot decrypt DB, server key cannot decrypt config)
 - Config parsing and validation
 - Sync queue operations
 - Database operations with encryption
+- Settings table CRUD operations
+- API response structure validation
 
 ### Integration Tests
 - Service installation/uninstallation
-- HTTP server endpoints
+- HTTP server endpoints (verify APIResponse structure)
+- Service control endpoints (start/stop/restart)
 - Server communication with retries
 - Offline mode transition
 - GUI login flow
+- System tray service control functionality
 
 ### System Tests
 - Memory leak detection (run 24 hours)
@@ -427,6 +507,38 @@ signtool sign /f cert.pfx /p password /t http://timestamp.digicert.com *.exe *.m
 - Binary size: < 15MB compressed
 - Installer size: < 20MB
 
+## Encryption Architecture Summary
+
+### Critical Rules - Two Separate Encryption Domains
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    ENCRYPTION SEPARATION                     │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  TYPE 1: Config File (Medium Importance)                    │
+│  ├─ Encryption: AES-256-GCM                                 │
+│  ├─ Key: MACHINE KEY ONLY                                   │
+│  ├─ Source: Derived from machine ID (PBKDF2)               │
+│  ├─ Storage: %PROGRAMDATA%\POSService\config.enc           │
+│  └─ Content: ServerURL, StoreID, Port, Intervals, etc.     │
+│                                                              │
+│  TYPE 2: Database (Very Important)                          │
+│  ├─ Encryption: ChaCha20-Poly1305                          │
+│  ├─ Key: SERVER KEY ONLY                                    │
+│  ├─ Source: Fetched from API server via HTTPS              │
+│  ├─ Storage: %PROGRAMDATA%\POSService\data.db              │
+│  └─ Content: ALL database data including settings table     │
+│                                                              │
+│  SEPARATION RULES:                                          │
+│  ✓ Machine key encrypts/decrypts config file ONLY          │
+│  ✓ Server key encrypts/decrypts database ONLY              │
+│  ✗ NO cross-usage of keys                                  │
+│  ✗ NO dual-key or hybrid encryption schemes                │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
 ## Security Considerations
 
 1. **Never log sensitive data** (tokens, keys, PINs)
@@ -437,6 +549,8 @@ signtool sign /f cert.pfx /p password /t http://timestamp.digicert.com *.exe *.m
 6. **Rotate logs** to prevent disk fill
 7. **Fail secure**: On any security error, deny access
 8. **Audit trail**: Log all authentication attempts
+9. **Encryption separation**: NEVER mix machine key and server key usage
+10. **API responses**: ALL endpoints must use the standardized APIResponse structure
 
 ## Notes for Claude Code
 
