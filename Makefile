@@ -219,15 +219,28 @@ docker-build:
 		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
 		-f build/Dockerfile .
 
-# Cross-compilation for testing
+# Build for Linux (multiplatform support)
 build-linux:
-	@echo "Building Linux binary for testing..."
+	@echo "Building Linux binary..."
+	@mkdir -p $(BUILD_DIR)/linux
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build \
 		$(GOFLAGS) \
 		-tags $(TAGS) \
 		-ldflags="$(LDFLAGS)" \
-		-o $(BUILD_DIR)/$(APP_NAME)-linux \
+		-o $(BUILD_DIR)/linux/$(APP_NAME) \
 		$(CMD_DIR)/service/main.go
+	@echo "Linux binary: $(BUILD_DIR)/linux/$(APP_NAME)"
+
+# Build for Windows (multiplatform support)
+build-windows: build-service build-gui
+	@echo "Windows binaries built!"
+
+# Build all platforms
+build-all: build-linux build-windows
+	@echo "All platform binaries built!"
+	@echo "  Linux:   $(BUILD_DIR)/linux/$(APP_NAME)"
+	@echo "  Windows: $(BUILD_DIR)/$(APP_NAME).exe"
+	@echo "  Windows GUI: $(BUILD_DIR)/$(APP_NAME)-gui.exe"
 
 # Help target
 help:
