@@ -1,6 +1,6 @@
-module pos-gate
+module github.com/professor93/promo-pos
 
-go 1.25.0
+go 1.25
 
 require (
 	// System Tray (requires CGO)

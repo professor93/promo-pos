@@ -11,7 +11,7 @@ Build a lightweight, secure Windows service application in Go that runs as a bac
 - **HTTP Server**: Use Fiber v3.0.0+ (lightweight, fast) or Chi v5.0.12+ as fallback
 - **Database**: SQLite with server-key encryption for critical data
 - **Data Encryption Strategy**:
-  - **Type 1 (Medium Importance)**: Config file data encrypted with machine key ONLY
+  - **Type 1 (Medium Importance)**: Config file data encrypted with hard-coded key + machine ID as salt
   - **Type 2 (Very Important)**: Database data encrypted with server key ONLY
 - **Config Sync**: Every 59 seconds from server start time
 - **Offline Mode**: Continue operation for 24 hours without server connection
@@ -165,10 +165,12 @@ type Config struct {
 }
 
 // TYPE 1 DATA (Medium Importance):
-// - Encryption: AES-256-GCM using MACHINE KEY ONLY
+// - Encryption: AES-256-GCM using HARD-CODED KEY
+// - Salt: Machine ID (unique per machine)
+// - Key derivation: PBKDF2(hardcodedKey, machineID, 10000 iterations)
 // - Storage: %PROGRAMDATA%\POSService\config.enc
 // - Fallback: Keep last valid config for 24 hours
-// - Machine key is derived from machine ID and used exclusively for config
+// - Hard-coded key is embedded in binary, machine ID provides machine-specific salt
 ```
 
 ### Phase 2: Windows Service Implementation
@@ -348,19 +350,20 @@ type APIResponse struct {
 // CRITICAL: Two separate encryption domains:
 //
 // TYPE 1 DATA (Medium Importance) - CONFIG FILE ONLY:
-// - Encryption: AES-256-GCM with MACHINE KEY ONLY
-// - Key: PBKDF2(machineID, salt, 10000 iterations)
+// - Encryption: AES-256-GCM with HARD-CODED KEY
+// - Salt: Machine ID (unique per machine)
+// - Key derivation: PBKDF2(hardcodedKey, machineID, 10000 iterations)
 // - Usage: Config file encryption/decryption
-// - Storage: Machine key derived on demand, never stored
+// - Storage: Hard-coded key embedded in binary, derived key never stored
 //
 // TYPE 2 DATA (Very Important) - DATABASE ONLY:
 // - Encryption: ChaCha20-Poly1305 with SERVER KEY ONLY
 // - Key: Fetched via HTTPS from server, rotated monthly
 // - Usage: ALL database encryption/decryption
-// - Storage: Server key encrypted with machine key, stored in registry
+// - Storage: Server key encrypted with config key, stored in registry
 //
 // Key separation rules:
-// - Machine key NEVER touches database
+// - Config key (hard-coded + machine ID salt) NEVER touches database
 // - Server key NEVER touches config file
 // - No dual-key or hybrid encryption
 ```
@@ -425,9 +428,9 @@ type SyncStatus struct {
 ### Unit Tests
 - Machine ID generation consistency
 - Encryption/decryption roundtrip for both key types:
-  - Machine key encryption/decryption (config file)
+  - Hard-coded key + machine ID salt encryption/decryption (config file)
   - Server key encryption/decryption (database)
-  - Verify key separation (machine key cannot decrypt DB, server key cannot decrypt config)
+  - Verify key separation (config key cannot decrypt DB, server key cannot decrypt config)
 - Config parsing and validation
 - Sync queue operations
 - Database operations with encryption
@@ -518,8 +521,9 @@ signtool sign /f cert.pfx /p password /t http://timestamp.digicert.com *.exe *.m
 │                                                              │
 │  TYPE 1: Config File (Medium Importance)                    │
 │  ├─ Encryption: AES-256-GCM                                 │
-│  ├─ Key: MACHINE KEY ONLY                                   │
-│  ├─ Source: Derived from machine ID (PBKDF2)               │
+│  ├─ Key: HARD-CODED KEY (embedded in binary)               │
+│  ├─ Salt: Machine ID (unique per machine)                  │
+│  ├─ Derivation: PBKDF2(hardcodedKey, machineID, 10000)     │
 │  ├─ Storage: %PROGRAMDATA%\POSService\config.enc           │
 │  └─ Content: ServerURL, StoreID, Port, Intervals, etc.     │
 │                                                              │
@@ -531,7 +535,7 @@ signtool sign /f cert.pfx /p password /t http://timestamp.digicert.com *.exe *.m
 │  └─ Content: ALL database data including settings table     │
 │                                                              │
 │  SEPARATION RULES:                                          │
-│  ✓ Machine key encrypts/decrypts config file ONLY          │
+│  ✓ Hard-coded key + machine ID salt for config ONLY        │
 │  ✓ Server key encrypts/decrypts database ONLY              │
 │  ✗ NO cross-usage of keys                                  │
 │  ✗ NO dual-key or hybrid encryption schemes                │
@@ -549,8 +553,9 @@ signtool sign /f cert.pfx /p password /t http://timestamp.digicert.com *.exe *.m
 6. **Rotate logs** to prevent disk fill
 7. **Fail secure**: On any security error, deny access
 8. **Audit trail**: Log all authentication attempts
-9. **Encryption separation**: NEVER mix machine key and server key usage
+9. **Encryption separation**: NEVER mix hard-coded key and server key usage
 10. **API responses**: ALL endpoints must use the standardized APIResponse structure
+11. **Hard-coded key**: Keep the hard-coded encryption key secure in source control (use environment variable for production builds)
 
 ## Notes for Claude Code
 
